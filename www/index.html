@@ -1,0 +1,208 @@
+﻿<!DOCTYPE html>
+
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+    <meta charset="utf-8" />
+    <title>jsext</title>
+    <style>
+        html,
+        body {
+            height: 100%;
+            width: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        #log {
+            height: 70%;
+            overflow: scroll;
+        }
+    </style>
+</head>
+
+<body>
+    <input type="button" onclick="init()" value="连接" />
+    <input type="button" onclick="home()" value="个人中心" />
+    <input type="button" onclick="code()" value="源代码" />
+    <input type="button" onclick="start()" value="启动应用" />
+    <input type="button" onclick="del()" value="清空" />
+    <div id="log"></div>
+    <script>
+        const app = {}
+            , sleep = delay => new Promise(resolve => setTimeout(resolve, delay));
+        let key = /key=([A-Z0-9]{40})/.exec(location.search)
+        if (key) {
+            window.setuserkey = key[1]
+            localStorage.setItem('userkey', setuserkey)
+        }
+        key = localStorage.getItem('userkey')
+        var logger = document.getElementById('log');
+        console.log = console.error = function (message) {
+            let time = new Date().toLocaleTimeString() + ':'
+            if (typeof message == 'object') {
+                logger.innerHTML = time + JSON.stringify(message) + '<br/>' + logger.innerHTML
+            } else {
+                logger.innerHTML = time + message + '<br/>' + logger.innerHTML
+            }
+        }
+        function del() {
+            logger.innerHTML = ''
+        }
+        function home() {
+            window.open('https://www.wxext.cn/home/i.html')
+        }
+        function code() {
+            window.open('https://github.com/wxext/cn.wxext.ext.ws')
+        }
+        async function start() {
+            let o = {
+                "method": "ext",
+                "action": "start",
+                "name": "jsext"
+            }
+            try {
+                let r = await fetch('http://127.0.0.1:8203/api?key=' + key + '&json=' + JSON.stringify(o))
+                o = await r.text();
+                console.log(o)
+            } catch (error) {
+                console.error('启动应用失败' + error)
+            }
+        }
+        async function init() {
+            if (!key) return console.log('key无效')
+            await getKey()
+            if (!app.key) return console.log('请启动应用jsext')
+            RunApp()
+        }
+        async function getKey() {
+            try {
+                let o = await fetch('auth/ws.json?key=' + key)
+                o = await o.json();
+                app.key = o.key
+                app.name = o.name
+            } catch (error) {
+                console.error('获取key失败,请启动应用')
+            }
+        }
+        async function onRequest(obj) {
+            //收到请求
+            return { msg: '收到了' }
+        }
+        async function onMessage(obj) {
+            console.log('收到消息:' + JSON.stringify(obj))
+            //处理收到消息的
+            if (obj.type == 724) {
+                //登录消息,启动插件之后微信才登录进来就会有
+                return sayHello()
+            }
+            if (!obj.data) return console.log('不是消息')
+            if (obj.data.fromid == obj.myid) return console.log('收到自己的消息')
+            let fd = await FuDuJi(obj)//复读吧
+            console.log('复读结果:' + JSON.stringify(fd))
+        }
+        async function FuDuJi(obj) {
+            //这个消息来得太快了,实测微信界面还没显示出来消息就到了
+            //延时1秒搞事情,直接发消息还没入库,给微信1秒的时间入库
+            //像表情之类的消息,不入库发送不不出去
+            await sleep(1000)
+            //如果是文本消息，则回复文本
+            if (obj.type == 1)
+                return await Send({ method: 'sendText', wxid: obj.data.fromid, msg: obj.data.msg })
+            //如果是图片消息，则回复图片
+            //图片type=3，但是这里没有图片路径，用xml资源事件来实现
+            if (obj.type == 708)
+                return await Send({ method: 'sendImage', wxid: obj.data.fromid, img: obj.data.path, imgType: 'file' })
+            //如果是动态表情，则回复动态表情
+            if (obj.type == 47)
+                return await Send({ method: 'sendEmojiForward', wxid: obj.data.fromid, xml: obj.data.msg })
+            //如果是小程序、文章链接，则回复小程序、文章链接
+            if (obj.type == 49)
+                return await Send({ method: 'sendAppmsgForward', wxid: obj.data.fromid, xml: obj.data.msg })
+            //有人加群，加群type=702 但是没有邀请人id，用群成员信息更新来实现
+            if (obj.type == 701) {
+                for (let user of obj.data.member) {
+                    if (user.new) {
+                        //这是新用户
+                        return await Send({ method: 'sendText', wxid: obj.data.fromid, msg: '又增加了新伙伴' })
+                    }
+                }
+            }
+            //有人退群
+            if (obj.type == 703)
+                return await Send({ method: 'sendText', wxid: obj.data.fromid, msg: '小伙伴离开了我们' })
+            return '不复读';
+        }
+        async function sayHello() {
+            let h = await Send({ method: 'sendText', wxid: 'filehelper', msg: '您的私人复读机已上线' })
+            console.log('hello', h)
+        }
+        let ws
+        function RunApp() {
+            const url = `ws://127.0.0.1:8202/wx?name=${app.name}&key=${app.key}`
+            ws = new WebSocket(url)
+            ws.onopen = function () {
+                console.log('可以开始干饭了');
+                sayHello()
+            }
+            ws.onmessage = async function (e) {
+                try {
+                    let obj = JSON.parse(e.data)
+                    if (obj.req !== undefined) return msgObj.cb(obj)
+                    if (obj.cb !== undefined) {
+                        //cb是服务端请求过来的需要回复,人家等着呢
+                        let cbid = obj.cb, method = obj.method
+                        obj = await onRequest(obj)
+                        obj.cb = cbid
+                        return ws.send(JSON.stringify(obj))
+                    }
+                    onMessage(obj)
+                } catch (error) {
+                    console.error("喵了个咪: '" + error.message + "'");
+                }
+            }
+            ws.onclose = function (e) {
+                //应用中心查看应用  https://www.wxext.cn/home/i.html
+                //应用不存在或信息不正确者或正在运行中[2]或者已停止[4]都会被取消
+                console.log(`被服务端取消了,可能是密钥或者应用状态不对,请去个人中心查看应用`);
+            }
+            ws.onerror = function (e) {
+                console.log("连接错误: " + error.toString());
+            }
+        }
+
+        const msgObj = {
+            _id: 0
+            , get id() { return msgObj._id > 60000 ? 0 : msgObj._id++ }
+            , callback: {}
+            , cb: function (obj) {
+                if (!msgObj.callback[obj.req]) return
+                clearTimeout(msgObj.callback[obj.req].timeout)
+                msgObj.callback[obj.req].cb.call(null, obj)
+                delete msgObj.callback[obj.req]
+            }
+            , event: console.log
+            , req: console.log
+            , add: function (cb, timeout) {
+                let id = msgObj.id
+                this.callback[id] = {
+                    cb,
+                    timeout: setTimeout(function () {
+                        msgObj.cb({ id, method: 'err', msg: 'timeout' })
+                    }, timeout || 3000)
+                }
+                return id
+            }
+        }
+        function Send(obj, timeout) {
+            return new Promise((resolve, reject) => {
+                if (!obj || !obj.method) return resolve({ method: 'err', msg: 'invalid method' })
+                if (!ws || ws.readyState != 1) return resolve({ method: 'err', msg: 'not connect' })
+                obj.req = msgObj.add(resolve, timeout)
+                ws.send(JSON.stringify(obj))
+            }).catch(err => console.error('error:' + err))
+        }
+    </script>
+</body>
+
+</html>
